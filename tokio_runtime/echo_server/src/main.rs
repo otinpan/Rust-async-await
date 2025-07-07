@@ -22,6 +22,7 @@ async fn main() -> io::Result<()> {
             let mut line = String::new();
             loop {
                 line.clear(); 
+                // クライアントからの入力を非同期で処理
                 match reader.read_line(&mut line).await { 
                     Ok(0) => { 
                         println!("closed: {}", addr);
