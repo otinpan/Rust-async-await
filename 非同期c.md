@@ -225,5 +225,246 @@ int main() {
 
 なにか入力したら他の処理をする。これは同期処理である。`select(...,NULL)`と同じようにイベント駆動方式である。イベントが起こったらepollは通知し、次の処理をする。それまではスレッドをブロッキングする。  
 
+自作Executorでは
+* Executorはpollできるタスクがあるかを逐一チェックする -> ポーリング式
+* I/Oはスレッドを作ることで個別に対応 -> スレッドをブロックする、リソースを消費
+
 Tokioでは  
 epoll用のスレッドを1つ用意してそのスレッドの中で、イベント駆動式、ブロッキングのような動作をする。イベントの通知が来たらメインスレッドのExecutorに通知を送る。その場合、スレッド1つ分のブロッキングはしかたないよね、という感じ。
+
+
+
+## イベント駆動式
+epollを扱うスレッドを立てることによってイベント駆動式を実装する。
+* epollに標準入力を登録する
+* epollスレッドで標準入力が到着したことを検出したら、workerスレッドにTaskを通して通知する
+* workerスレッドは標準入力を受け取り、入力に対して処理をする
+
+epollが入力を待っている間、workerは他の処理をすることが出来る。また、workerはタスクが来た時だけ起こされるためポーリング式ではなくイベント駆動式になる。
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdbool.h>
+
+#define MAX_LINE 1024
+
+int epfd;
+bool is_running = true;
+
+typedef struct Task {
+    int fd;
+    struct Task *next;
+} task_t;
+
+task_t *task_head = NULL;
+task_t *task_tail = NULL;
+
+pthread_mutex_t task_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t task_cond = PTHREAD_COND_INITIALIZER;
+
+void *worker_thread_func(void *arg) {
+    while (is_running) {
+        pthread_mutex_lock(&task_mutex);
+        while (task_head == NULL && is_running) {
+            pthread_cond_wait(&task_cond, &task_mutex);
+        }
+
+        if (!is_running) {
+            pthread_mutex_unlock(&task_mutex);
+            break;
+        }
+
+        task_t *t = task_head;
+        if (t) {
+            task_head = t->next;
+            if (task_head == NULL) {
+                task_tail = NULL;
+            }
+        }
+
+        pthread_mutex_unlock(&task_mutex);
+
+        if (t) {
+            char buf[MAX_LINE] = {0};
+            int n = read(t->fd, buf, sizeof(buf) - 1);
+
+            if (n > 0) {
+                int val = atoi(buf);
+                int result = val + 10;
+                printf("[worker thread] %d + 10 = %d\n", val, result);
+            } else if (n == 0) {
+                printf("[worker thread] fd %d closed by peer\n", t->fd);
+                close(t->fd);
+            } else {
+                perror("read");
+            }
+
+            free(t);
+        }
+    }
+    return NULL;
+}
+
+void *epoll_thread_func(void *arg) {
+    struct epoll_event events[10];
+
+    while (is_running) {
+        int nfds = epoll_wait(epfd, events, 10, 1000);
+
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            perror("epoll_wait"); 
+            break;
+        } else if (nfds == 0) {
+            continue;
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            int fd = events[i].data.fd;
+
+            task_t *t = (task_t*)malloc(sizeof(task_t));
+            t->fd = fd;
+            t->next = NULL;
+
+            pthread_mutex_lock(&task_mutex);
+            if (task_tail) {
+                task_tail->next = t;
+                task_tail = t;
+            } else {
+                task_head = task_tail = t;
+            }
+
+            pthread_cond_signal(&task_cond);
+            pthread_mutex_unlock(&task_mutex);
+
+            printf("[epoll thread] queued FD %d for worker\n", fd); 
+        }
+    }
+    return NULL;
+}
+
+
+void sigint_handler(int signum) {
+    is_running = false;
+    pthread_cond_broadcast(&task_cond);
+}
+
+int main() {
+    signal(SIGINT, sigint_handler);
+
+    epfd = epoll_create1(0);
+    if (epfd < 0) {
+        perror("epoll_create1");
+        return 1;
+    }
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = 0; // 標準入力を登録
+
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, 0, &ev) < 0) {
+        perror("epoll_ctl");
+        return 1;
+    }
+
+    pthread_t epoll_tid, worker_tid;
+    if (pthread_create(&epoll_tid, NULL, epoll_thread_func, NULL) != 0) {
+        perror("pthread_create epoll");
+        return 1;
+    }
+    if (pthread_create(&worker_tid, NULL, worker_thread_func, NULL) != 0) {
+        perror("pthread_create worker");
+        return 1;
+    }
+
+    while (is_running) {
+        printf("[main thread] doing other work...\n");
+        sleep(2);
+    }
+
+    pthread_join(epoll_tid, NULL);
+    pthread_join(worker_tid, NULL);
+    close(epfd);
+
+    printf("Program terminated.\n");
+    return 0;
+}
+
+```
+出力
+```
+[main thread] doing other work...
+[main thread] doing other work...
+3
+[worker thread] 3 + 10 = 13
+4
+[worker thread] 4 + 10 = 14
+[main thread] doing other work...
+5
+[worker thread] 5 + 10 = 15
+[main thread] doing other work...
+```
+
+
+epoll を使って標準入力を監視するスレッドを立てる
+
+標準入力にデータが来たら Waker を叩く
+
+Executor は queue を巡回するのではなく eventfd（もしくは pipe）による通知で起床する
+
+poll() が Pending を返したらまた待機する
+
+Executor に eventfd_fd を持たせる
+
+Task.schedule() で eventfd に書き込む
+
+epoll スレッドを Executor 初期化時に立てる
+
+stdin 用の Future を実装する
+
+```
++-------------------+
+|    ユーザ入力     |
+|    (ターミナル)   |
++---------+---------+
+          |
+          v
++---------+---------+
+|   epoll_wait()    |   <--- epoll スレッドが待っている
++---------+---------+
+          |
+(データ来たら)
+          |
+          v
++---------+---------+
+|    Waker.wake()   |   <--- Future に渡した waker が呼ばれる
++---------+---------+
+          |
+          v
++---------+---------+
+| write(eventfd_fd) |   <--- eventfd に書き込み → Executor に通知
++---------+---------+
+          |
+          v
++---------+---------+
+| Executor.run()    |   <--- eventfd で起床
++---------+---------+
+          |
+          v
++---------+---------+
+| task.poll()       |   <--- Future の poll() が呼ばれる
++---------+---------+
+          |
+(Readyなら結果取得)
+          |
+          v
++---------+---------+
+| 結果を出力        |
++-------------------+
+```
