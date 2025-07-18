@@ -22,22 +22,13 @@ Rustの非同期処理の仕組みを知っているとこのような利点が�
   - [Cooperative](#cooperative)  
 
 - [Rustの非同期処理](Rust_concurrency)  
-  - [sleep](#sleep)  
-  - [ファイル読み込み](#ファイル読み込み)  
-  - [並行サーバー](#並行サーバー)  
+  
+- [内部の動作](internal_mechanics)  
 
- 
 
-- [内部の動作](#内部の動作)  
-  - [Future](#Future)  
-  - [aysnc/await](#aysncawait)  
-  - [Task、Executor、Waker](#taskexecutorwaker)  
-  - [Spawner](#spawner)  
-  - [具体的な動作](#具体的な動作)  
+- [非同期ライブラリ](asynchronous_library)  
 
-- [I/O多重化](#io多重化)  
-
-- [非同期ライブラリ](#非同期ライブラリ)  
+- [おわり](#おわり)
 
 
 ## 並行と並列
@@ -128,6 +119,12 @@ Cooperative（協調型）スケジューリングでは、スケジューラは
 
 ![](Assets/Cooperative.png)
 
+### [Rustの非同期処理](Rust_concurrency)へジャンプ  
+  
+### [内部の動作](internal_mechanics)へジャンプ  
+
+
+### [非同期ライブラリ](asynchronous_library)へジャンプ  
  
 
 ### おわり
